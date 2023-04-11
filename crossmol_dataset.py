@@ -26,10 +26,13 @@ def collate(batch_list):
     args.bond_drop_rate = 0
     args.no_cache = True
     shared_dict = {}
-    batched_graph_object = mol2graph([smile for smile,text in batch_list],shared_dict,args)
-    descriptions = [text for smile,text in batch_list]
-    return batched_graph_object,descriptions
-
+    try:
+        batched_graph_object = mol2graph([smile for smile,text in batch_list],shared_dict,args)
+        descriptions = [text for smile,text in batch_list]
+        return batched_graph_object,descriptions
+    except Exception as e:
+        return None, None
+        
 def get_dataloaders(data_path,batch_size):
 
     dataset_train = CrossMolDataset(data_path,"train")
