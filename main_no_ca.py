@@ -7,6 +7,11 @@ import task.train
 
 import torch
 import transformers
+from tqdm import tqdm
+import copy
+import numpy as np
+from datetime import datetime
+import crossmol_dataset
 
 
 ## Use pretrain config
@@ -154,8 +159,8 @@ class CrossMol(torch.nn.Module):
         grover_output = self.grover_model.grover((f_atoms, f_bonds, a2b, b2a, b2revb, a_scope, b_scope, a2a))
 
         f_atoms = self.grover_linear_layer(grover_output['atom_from_atom'])
-        f_bonds = self.grover_linear_layer(grover_output['bond_from_atom'])
-        new_grover_batch = (f_atoms, f_bonds, a2b, b2a, b2revb, a_scope, b_scope, a2a)
+        # f_bonds = self.grover_linear_layer(grover_output['bond_from_atom'])
+        # new_grover_batch = (f_atoms, f_bonds, a2b, b2a, b2revb, a_scope, b_scope, a2a)
         
         # ========== Initial pass through bert text encoder ==========
         encoded_input = self.tokenizer(text=text_batch, return_tensors='pt', truncation=True, max_length=512, padding=True).to(self.device)
@@ -165,70 +170,78 @@ class CrossMol(torch.nn.Module):
             attention_mask=encoded_input['attention_mask'])
         last_hidden_state = bert_output['last_hidden_state']
         attention_mask = encoded_input['attention_mask']
-        extended_attention_mask = self.bert_model.get_extended_attention_mask(
-            attention_mask=encoded_input['attention_mask'], 
-            input_shape=encoded_input['input_ids'].shape)
-        new_text_batch = (last_hidden_state, extended_attention_mask, attention_mask)
+        # extended_attention_mask = self.bert_model.get_extended_attention_mask(
+        #     attention_mask=encoded_input['attention_mask'], 
+        #     input_shape=encoded_input['input_ids'].shape)
+        # new_text_batch = (last_hidden_state, extended_attention_mask, attention_mask)
 
         atom_sizes = [i[1] for i in a_scope]
 
-        # ========== e1 (combined) ==========
-        text_features_combined = last_hidden_state*attention_mask.unsqueeze(dim=2)
-        mol_features_combined = f_atoms
-        mol_features_combined = torch.split(mol_features_combined[1:],atom_sizes)
+        # # ========== e1 (combined) ==========
+        # text_features_combined = last_hidden_state*attention_mask.unsqueeze(dim=2)
+        # mol_features_combined = f_atoms
+        # mol_features_combined = torch.split(mol_features_combined[1:],atom_sizes)
 
-        mol_features_combined_mean = []
-        for idx in range(len(atom_sizes)):
-            mol_features_combined_mean.append(torch.mean(mol_features_combined[idx],dim=0))
+        # mol_features_combined_mean = []
+        # for idx in range(len(atom_sizes)):
+        #     mol_features_combined_mean.append(torch.mean(mol_features_combined[idx],dim=0))
 
-        mol_features_combined_mean = torch.stack(mol_features_combined_mean)
-        text_features_combined_mean = torch.mean(text_features_combined,dim=1 )
+        # mol_features_combined_mean = torch.stack(mol_features_combined_mean)
+        # text_features_combined_mean = torch.mean(text_features_combined,dim=1 )
 
-        e1 = (text_features_combined_mean + mol_features_combined_mean)/2
+        # e1 = (text_features_combined_mean + mol_features_combined_mean)/2
 
         # ========== e2 (only text) ==========
         text_features_simple = last_hidden_state*attention_mask.unsqueeze(dim=2)
-        # print(text_features_simple.isnan().any(), attention_mask.isnan().any())
         text_features_simple_mean = torch.mean(text_features_simple,dim=1)
-        
         e2 = text_features_simple_mean
 
         # ========== e3 (only mol) ==========
-        mol_features_simple = f_atoms
-        mol_features_simple = torch.split(mol_features_simple[1:],atom_sizes)
+        mol_features_simple = torch.split(f_atoms[1:], atom_sizes)
 
         mol_features_simple_mean = []
         for idx in range(len(atom_sizes)):
-            mol_features_simple_mean.append(torch.mean(mol_features_simple[idx],dim=0))
+            mol_features_simple_mean.append(torch.mean(mol_features_simple[idx], dim=0))
 
         mol_features_simple_mean = torch.stack(mol_features_simple_mean)
         e3 = mol_features_simple_mean
 
-        return e1,e2,e3
+        return None, e2,e3
 
-    def cos_dist(self,x,y):
-        return 1 - torch.nn.CosineSimilarity(dim=1)(x,y)
+    # def cos_dist(self,x,y):
+    #     return 1 - torch.nn.CosineSimilarity(dim=1)(x,y)
 
-    def loss_fn(self,e1,e2,e3):
-        sim = torch.nn.CosineSimilarity(dim=1)
+    # def loss_fn(self,e1,e2,e3):
+    #     sim = torch.nn.CosineSimilarity(dim=1)
 
-        num = torch.exp(sim(e1, e2)) + torch.exp(sim(e2, e3)) + torch.exp(sim(e1, e3))
+    #     num = torch.exp(sim(e1, e2)) + torch.exp(sim(e2, e3)) + torch.exp(sim(e1, e3))
 
-        denom = torch.zeros_like(num)
-        for pos_ind in range(len(e1)):
-            neg_inds = [i for i in range(len(e1)) if i != pos_ind]
-            denom[pos_ind] = torch.exp(sim(e1[pos_ind], e1[neg_inds])).sum()
+    #     denom = torch.zeros_like(num)
+    #     for pos_ind in range(len(e1)):
+    #         neg_inds = [i for i in range(len(e1)) if i != pos_ind]
+    #         denom[pos_ind] = torch.exp(sim(e1[pos_ind], e1[neg_inds])).sum()
 
-        for pos_ind in range(len(e2)):
-            neg_inds = [i for i in range(len(e2)) if i != pos_ind]
-            denom[pos_ind] += torch.exp(sim(e2[pos_ind], e2[neg_inds])).sum()
+    #     for pos_ind in range(len(e2)):
+    #         neg_inds = [i for i in range(len(e2)) if i != pos_ind]
+    #         denom[pos_ind] += torch.exp(sim(e2[pos_ind], e2[neg_inds])).sum()
 
-        for pos_ind in range(len(e3)):
-            neg_inds = [i for i in range(len(e3)) if i != pos_ind]
-            denom[pos_ind] += torch.exp(sim(e3[pos_ind], e3[neg_inds])).sum()
+    #     for pos_ind in range(len(e3)):
+    #         neg_inds = [i for i in range(len(e3)) if i != pos_ind]
+    #         denom[pos_ind] += torch.exp(sim(e3[pos_ind], e3[neg_inds])).sum()
 
-        loss = -1 * torch.log(torch.divide(num,denom))
-        return loss
+    #     loss = -1 * torch.log(torch.divide(num,denom))
+    #     return loss
+    def clip_loss_fn(self, text_embeddings, image_embeddings, temperature=1.0):
+        logits = (text_embeddings @ image_embeddings.T) / temperature
+        images_similarity = image_embeddings @ image_embeddings.T
+        texts_similarity = text_embeddings @ text_embeddings.T
+        targets = torch.nn.functional.softmax(
+            (images_similarity + texts_similarity) / 2 * temperature, dim=-1
+        )
+        images_loss = (-targets.T * torch.nn.LogSoftmax(dim=-1)(logits.T)).sum(1)
+        texts_loss = (-targets * torch.nn.LogSoftmax(dim=-1)(logits)).sum(1)
+        # print(images_loss.shape, texts_loss.shape); quit()
+        return (images_loss + texts_loss) / 2.0
 
     def fit(self, train_loader, valid_loader, test_loader, epochs, lr, weight_decay, verbose=True):
         self.to(self.device)
@@ -238,7 +251,7 @@ class CrossMol(torch.nn.Module):
         train_loss_record = [] 
         # valid_loss, _ = self.test(valid_loader)
         # valid_loss_record = [valid_loss]
-        valid_loss_record = [np.inf]
+        valid_loss_record = []
         best_model = copy.deepcopy(self)
         if verbose: print('Done evaluating')
         for ep in tqdm(range(epochs)):
@@ -252,7 +265,7 @@ class CrossMol(torch.nn.Module):
                 f_atoms, f_bonds, a2b, b2a, b2revb, a_scope, b_scope, a2a = graph.get_components()
                 f_atoms.to(self.device), f_bonds.to(self.device)
                 e1,e2,e3 = self.forward(text, (f_atoms, f_bonds, a2b, b2a, b2revb, a_scope, b_scope, a2a))
-                loss = self.loss_fn(e1,e2,e3).mean()
+                loss = self.clip_loss_fn(e2,e3).mean()
                 train_loss_record.append(loss.detach().cpu().numpy())
 
                 loss.backward() 
@@ -262,7 +275,7 @@ class CrossMol(torch.nn.Module):
             # ======= Validation =======
             valid_loss, _ = self.test(valid_loader)
             valid_loss_record.append(valid_loss)
-            if valid_loss < np.max(valid_loss_record):
+            if valid_loss <= np.max(valid_loss_record):
                 best_model = copy.deepcopy(self)
 
                 torch.save(self.state_dict(), 'epoch_{}_val_loss_{:.2f}_no_ca.pth'.format(str(ep), valid_loss))
@@ -288,22 +301,13 @@ class CrossMol(torch.nn.Module):
                 f_atoms, f_bonds, a2b, b2a, b2revb, a_scope, b_scope, a2a = graph.get_components()
                 f_atoms.to(self.device), f_bonds.to(self.device)
                 e1,e2,e3 = self.forward(text, (f_atoms, f_bonds, a2b, b2a, b2revb, a_scope, b_scope, a2a))
-                loss = self.loss_fn(e1,e2,e3).mean()
+                loss = self.clip_loss_fn(e2,e3).mean()
 
                 losses.append(loss.item())
-                outputs.append([e1.cpu().numpy(), e2.cpu().numpy(), e3.cpu().numpy()])
+                outputs.append([e2.cpu().numpy(), e3.cpu().numpy()])
         self.train()
 
         return np.mean(losses), np.array(outputs)
-
-
-
-
-from tqdm import tqdm
-import copy
-import numpy as np
-from datetime import datetime
-import crossmol_dataset
 
 
 
@@ -315,9 +319,11 @@ dataloader_train, dataloader_val, dataloader_test = crossmol_dataset.get_dataloa
 epochs = 20
 lr = 1e-5
 weight_decay = False
-crossmol, test_loss, test_output = crossmol.fit(dataloader_train, dataloader_val, dataloader_test, epochs, lr, weight_decay, verbose=True)
+# crossmol, test_loss, test_output = crossmol.fit(dataloader_train, dataloader_val, dataloader_test, epochs, lr, weight_decay, verbose=True)
+# now = datetime.now()
+# current_time = now.strftime("%H:%M:%S")
+# torch.save(crossmol.state_dict(), '{}_{:.6f}_no_ca.pth'.format(current_time, test_loss))
 
-now = datetime.now()
-current_time = now.strftime("%H:%M:%S")
-torch.save(crossmol.state_dict(), '{}_{:.6f}_no_ca.pth'.format(current_time, test_loss))
-# crossmol.load_state_dict(torch.load('model.pth'))
+crossmol.load_state_dict(torch.load('epoch_15_val_loss_0.05_no_ca.pth'))
+test_loss, test_output = crossmol.test(dataloader_test)
+np.save('test_output_no_ca.npy', test_output)
